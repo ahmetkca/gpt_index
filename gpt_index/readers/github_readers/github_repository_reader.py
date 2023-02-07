@@ -6,7 +6,6 @@ The documents are either the contents of the files in the repository or
 the text extracted from the files using the parser.
 """
 
-import asyncio
 import base64
 import binascii
 import logging
@@ -85,14 +84,6 @@ class GithubRepositoryReader(BaseReader):
         self._use_parser = use_parser
         self._verbose = verbose
 
-        # Set up the event loop
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # If there is no running loop, create a new one
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-
         self._client = GithubClient(github_token)
 
     def _load_data_from_commit(self, commit_sha: str) -> List[Document]:
@@ -106,18 +97,16 @@ class GithubRepositoryReader(BaseReader):
         :return: list of documents
         """
 
-        commit_response: GitCommitResponseModel = self.loop.run_until_complete(
-            self._client.get_commit(self._owner, self._repo, commit_sha)
+        commit_response: GitCommitResponseModel = self._client.get_commit(
+            self._owner, self._repo, commit_sha
         )
 
         tree_sha = commit_response.tree.sha
-        blobs_and_paths = self._loop.run_until_complete(self._recurse_tree(tree_sha))
+        blobs_and_paths = self._recurse_tree(tree_sha)
 
         print_if_verbose(self._verbose, f"got {len(blobs_and_paths)} blobs")
 
-        return self._loop.run_until_complete(
-            self._generate_documents(blobs_and_paths=blobs_and_paths)
-        )
+        return self._generate_documents(blobs_and_paths=blobs_and_paths)
 
     def _load_data_from_branch(self, branch: str) -> List[Document]:
         """
@@ -129,18 +118,16 @@ class GithubRepositoryReader(BaseReader):
 
         :return: list of documents
         """
-        branch_data: GitBranchResponseModel = self._loop.run_until_complete(
-            self._client.get_branch(self._owner, self._repo, branch)
+        branch_data: GitBranchResponseModel = self._client.get_branch(
+            self._owner, self._repo, branch
         )
 
         tree_sha = branch_data.commit.commit.tree.sha
-        blobs_and_paths = self._loop.run_until_complete(self._recurse_tree(tree_sha))
+        blobs_and_paths = self._recurse_tree(tree_sha)
 
         print_if_verbose(self._verbose, f"got {len(blobs_and_paths)} blobs")
 
-        return self._loop.run_until_complete(
-            self._generate_documents(blobs_and_paths=blobs_and_paths)
-        )
+        return self._generate_documents(blobs_and_paths=blobs_and_paths)
 
     def load_data(
         self,
@@ -171,9 +158,9 @@ class GithubRepositoryReader(BaseReader):
 
         raise ValueError("You must specify one of commit or branch.")
 
-    async def _recurse_tree(
+    def _recurse_tree(
         self, tree_sha: str, current_path: str = "", current_depth: int = 0
-    ) -> Any:
+    ) -> List[Tuple[GitTreeResponseModel.GitTreeObject, str]]:
         """
         Recursively get all blob tree objects in a tree.
         And construct their full path relative to the root of the repository.
@@ -191,7 +178,7 @@ class GithubRepositoryReader(BaseReader):
             self._verbose, "\t" * current_depth + f"current path: {current_path}"
         )
 
-        tree_data: GitTreeResponseModel = await self._client.get_tree(
+        tree_data: GitTreeResponseModel = self._client.get_tree(
             self._owner, self._repo, tree_sha
         )
         print_if_verbose(
@@ -204,7 +191,7 @@ class GithubRepositoryReader(BaseReader):
                     self._verbose, "\t" * current_depth + f"recursing into {tree.path}"
                 )
                 blobs_and_full_paths.extend(
-                    await self._recurse_tree(tree.sha, file_path, current_depth + 1)
+                    self._recurse_tree(tree.sha, file_path, current_depth + 1)
                 )
             elif tree.type == "blob":
                 print_if_verbose(
@@ -213,7 +200,7 @@ class GithubRepositoryReader(BaseReader):
                 blobs_and_full_paths.append((tree, file_path))
         return blobs_and_full_paths
 
-    async def _generate_documents(
+    def _generate_documents(
         self, blobs_and_paths: List[Tuple[GitTreeResponseModel.GitTreeObject, str]]
     ) -> List[Document]:
         """
@@ -222,66 +209,53 @@ class GithubRepositoryReader(BaseReader):
         :param `blobs_and_paths`: list of tuples of (tree object, file's full path in the repo realtive to the root of the repo)
         :return: list of documents
         """
-        buffered_iterator = BufferedGitBlobDataIterator(
-            blobs_and_paths=blobs_and_paths,
-            github_client=self._client,
-            owner=self._owner,
-            repo=self._repo,
-            loop=self._loop,
-            buffer_size=5,  # TODO: make this configurable
-            verbose=self._verbose,
-        )
+        documents: List[Document] = []
+        for blob_object, full_path in blobs_and_paths:
+            blob_data = self._client.get_blob(self._owner, self._repo, blob_object.sha)
 
-        documents = []
-        async for blob_data, full_path in buffered_iterator:
             print_if_verbose(self._verbose, f"generating document for {full_path}")
+
             assert (
                 blob_data.encoding == "base64"
             ), f"blob encoding {blob_data.encoding} not supported"
+
             decoded_bytes = None
             try:
                 decoded_bytes = base64.b64decode(blob_data.content)
-                del blob_data.content
-            except binascii.Error:
-                print_if_verbose(
-                    self._verbose, f"could not decode {full_path} as base64"
-                )
+            except binascii.Error as e:
+                print_if_verbose(self._verbose, f"error decoding {full_path}: {e}")
                 continue
 
-            if self._use_parser:
-                document = self._parse_supported_file(
-                    file_path=full_path,
-                    file_content=decoded_bytes,
-                    tree_sha=blob_data.sha,
-                    tree_path=full_path,
+            if self._use_parser and (
+                (
+                    document := self._parse_supported_file(
+                        file_path=full_path,
+                        file_content=decoded_bytes,
+                        tree_sha=blob_data.sha,
+                        tree_path=full_path,
+                    )
                 )
-                if document is not None:
-                    documents.append(document)
-                else:
-                    continue
+                is not None
+            ):
+                documents.append(document)
+                continue
 
             try:
-                if decoded_bytes is None:
-                    raise ValueError("decoded_bytes is None")
-                decoded_text = decoded_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                print_if_verbose(
-                    self._verbose, f"could not decode {full_path} as utf-8"
-                )
+                decoded_content_as_str = decoded_bytes.decode("utf-8")
+            except UnicodeDecodeError as e:
+                print_if_verbose(self._verbose, f"error decoding {full_path}: {e}")
                 continue
-            print_if_verbose(
-                self._verbose,
-                f"got {len(decoded_text)} characters - adding to documents - {full_path}",
+
+            documents.append(
+                Document(
+                    text=decoded_content_as_str,
+                    extra_info={
+                        "full_path": full_path,
+                        "file_name": os.path.basename(full_path),
+                        "file_extension": os.path.splitext(full_path)[1],
+                    },
+                )
             )
-            document = Document(
-                text=decoded_text,
-                doc_id=blob_data.sha,
-                extra_info={
-                    "file_path": full_path,
-                    "file_name": full_path.split("/")[-1],
-                },
-            )
-            documents.append(document)
         return documents
 
     def _parse_supported_file(

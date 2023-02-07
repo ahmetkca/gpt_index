@@ -9,6 +9,14 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+try:
+    import requests
+except ImportError:
+    raise ImportError(
+        "Please install httpx to use the GithubRepositoryReader. "
+        "You can do so by running `pip install requests`."
+    )
+
 from dataclasses_json import DataClassJsonMixin
 
 
@@ -200,13 +208,13 @@ class GithubClient:
         """Get all available endpoints."""
         return {**self._endpoints}
 
-    async def request(
+    def request(
         self,
         endpoint: str,
         method: str,
         headers: Dict[str, Any] = {},
         **kwargs: Any,
-    ) -> Any:
+    ) -> requests.Response:
         """
         Make an API request to the Github API.
 
@@ -231,32 +239,20 @@ class GithubClient:
                                 owner="owner", repo="repo",
                                 tree_sha="tree_sha")
         """
-        try:
-            import httpx
-        except ImportError:
-            raise ImportError(
-                "Please install httpx to use the GithubRepositoryReader. "
-                "You can do so by running `pip install httpx`."
-            )
 
         _headers = {**self._headers, **headers}
 
-        _client: httpx.AsyncClient
-        async with httpx.AsyncClient(
-            headers=_headers, base_url=self._base_url
-        ) as _client:
-            try:
-                response = await _client.request(
-                    method, url=self._endpoints[endpoint].format(**kwargs)
-                )
-            except httpx.HTTPError as excp:
-                print(f"HTTP Exception for {excp.request.url} - {excp}")
-                raise excp
-            return response
+        try:
+            return requests.request(
+                method,
+                url=self._base_url + self._endpoints[endpoint].format(**kwargs),
+                headers=_headers,
+            )
+        except requests.HTTPError as excp:
+            print(f"HTTP Exception for {excp.request.url}:\n{excp}")
+            raise excp
 
-    async def get_branch(
-        self, owner: str, repo: str, branch: str
-    ) -> GitBranchResponseModel:
+    def get_branch(self, owner: str, repo: str, branch: str) -> GitBranchResponseModel:
         """
         Get information about a branch. (Github API endpoint: getBranch).
 
@@ -273,15 +269,11 @@ class GithubClient:
         """
         return GitBranchResponseModel.from_json(
             (
-                await self.request(
-                    "getBranch", "GET", owner=owner, repo=repo, branch=branch
-                )
+                self.request("getBranch", "GET", owner=owner, repo=repo, branch=branch)
             ).text
         )
 
-    async def get_tree(
-        self, owner: str, repo: str, tree_sha: str
-    ) -> GitTreeResponseModel:
+    def get_tree(self, owner: str, repo: str, tree_sha: str) -> GitTreeResponseModel:
         """
         Get information about a tree. (Github API endpoint: getTree).
 
@@ -298,15 +290,13 @@ class GithubClient:
         """
         return GitTreeResponseModel.from_json(
             (
-                await self.request(
+                self.request(
                     "getTree", "GET", owner=owner, repo=repo, tree_sha=tree_sha
                 )
             ).text
         )
 
-    async def get_blob(
-        self, owner: str, repo: str, file_sha: str
-    ) -> GitBlobResponseModel:
+    def get_blob(self, owner: str, repo: str, file_sha: str) -> GitBlobResponseModel:
         """
         Get information about a blob. (Github API endpoint: getBlob).
 
@@ -323,13 +313,13 @@ class GithubClient:
         """
         return GitBlobResponseModel.from_json(
             (
-                await self.request(
+                self.request(
                     "getBlob", "GET", owner=owner, repo=repo, file_sha=file_sha
                 )
             ).text
         )
 
-    async def get_commit(
+    def get_commit(
         self, owner: str, repo: str, commit_sha: str
     ) -> GitCommitResponseModel:
         """
@@ -348,7 +338,7 @@ class GithubClient:
         """
         return GitCommitResponseModel.from_json(
             (
-                await self.request(
+                self.request(
                     "getCommit", "GET", owner=owner, repo=repo, commit_sha=commit_sha
                 )
             ).text
@@ -356,22 +346,15 @@ class GithubClient:
 
 
 if __name__ == "__main__":
-    import asyncio
+    """Test the GithubClient."""
+    client = GithubClient()
+    tree_resp = client.get_tree(owner="ahmetkca", repo="CommitAI", tree_sha="with-body")
 
-    async def main() -> None:
-        """Test the GithubClient."""
-        client = GithubClient()
-        response = await client.get_tree(
-            owner="ahmetkca", repo="CommitAI", tree_sha="with-body"
-        )
-
-        for obj in response.tree:
-            if obj.type == "blob":
-                print(obj.path)
-                print(obj.sha)
-                blob_response = await client.get_blob(
-                    owner="ahmetkca", repo="CommitAI", file_sha=obj.sha
-                )
-                print(blob_response.content)
-
-    asyncio.run(main())
+    for obj in tree_resp.tree:
+        if obj.type == "blob":
+            print(obj.path)
+            print(obj.sha)
+            blob_resp = client.get_blob(
+                owner="ahmetkca", repo="CommitAI", file_sha=obj.sha
+            )
+            print(blob_resp.content)

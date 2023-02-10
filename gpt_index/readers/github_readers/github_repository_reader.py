@@ -291,8 +291,12 @@ class GithubRepositoryReader(BaseReader):
                 )
                 if document is not None:
                     documents.append(document)
-                else:
                     continue
+                print_if_verbose(
+                    self._verbose,
+                    f"could not parse {full_path} as a supported file type"
+                    + " - falling back to decoding as utf-8 raw text",
+                )
 
             try:
                 if decoded_bytes is None:

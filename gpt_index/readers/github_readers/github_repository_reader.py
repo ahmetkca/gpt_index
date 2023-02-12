@@ -9,6 +9,7 @@ the text extracted from the files using the parser.
 import asyncio
 import base64
 import binascii
+import enum
 import logging
 import os
 import pathlib
@@ -35,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 
 class GithubRepositoryReader(BaseReader):
+    class FilterType(enum.Enum):
+        IGNORE = "ignore"
+        INCLUDE = "include"
+
     """
     Github repository reader.
 
@@ -57,8 +62,8 @@ class GithubRepositoryReader(BaseReader):
         verbose: bool = False,
         github_token: Optional[str] = None,
         concurrent_requests: int = 5,
-        ignore_file_extensions: Optional[List[str]] = None,
-        ignore_directories: Optional[List[str]] = None,
+        filter_directories: Optional[Tuple[List[str], FilterType]] = None,
+        filter_file_extensions: Optional[Tuple[List[str], FilterType]] = None,
     ):
         """
         Initialize params.
@@ -97,8 +102,8 @@ class GithubRepositoryReader(BaseReader):
         self._use_parser = use_parser
         self._verbose = verbose
         self._concurrent_requests = concurrent_requests
-        self._ignore_file_extensions = ignore_file_extensions
-        self._ignore_directories = ignore_directories
+        self._filter_directories = filter_directories
+        self._filter_file_extensions = filter_file_extensions
 
         # Set up the event loop
         try:
@@ -109,6 +114,74 @@ class GithubRepositoryReader(BaseReader):
             asyncio.set_event_loop(self._loop)
 
         self._client = GithubClient(github_token)
+
+    def _check_filter_directories(self, tree_obj_path: str) -> bool:
+        filter_directories, filter_type = self._filter_directories
+        print_if_verbose(
+            self._verbose,
+            f"Checking {tree_obj_path} whether to {filter_type} it"
+            + f" based on the filter directories: {filter_directories}",
+        )
+
+        if filter_type == self.FilterType.IGNORE:
+            return not any(
+                tree_obj_path.startswith(directory)
+                or directory.startswith(tree_obj_path)
+                for directory in filter_directories
+            )
+        elif filter_type == self.FilterType.INCLUDE:
+            return any(
+                tree_obj_path.startswith(directory)
+                or directory.startswith(tree_obj_path)
+                for directory in filter_directories
+            )
+        else:
+            raise ValueError(
+                f"Unknown filter type: {filter_type}. "
+                "Please use either 'ignore' or 'include'."
+            )
+
+    def _check_filter_file_extensions(self, tree_obj_path: str) -> bool:
+        """
+        Check if a tree object should be allowed based on the file extensions.
+
+        :param `tree_obj_path`: path of the tree object
+
+        :return: True if the tree object should be allowed, False otherwise
+        """
+        filter_file_extensions, filter_type = self._filter_file_extensions
+        print_if_verbose(
+            self._verbose,
+            f"Checking {tree_obj_path} whether to {filter_type} it"
+            + f" based on the filter file extensions: {filter_file_extensions}",
+        )
+
+        if filter_type == self.FilterType.IGNORE:
+            return get_file_extension(tree_obj_path) not in filter_file_extensions
+        elif filter_type == self.FilterType.INCLUDE:
+            return get_file_extension(tree_obj_path) in filter_file_extensions
+        else:
+            raise ValueError(
+                f"Unknown filter type: {filter_type}. "
+                "Please use either 'ignore' or 'include'."
+            )
+
+    def _allow_tree_obj(self, tree_obj_path: str) -> bool:
+        """
+        Check if a tree object should be allowed.
+
+        :param `tree_obj_path`: path of the tree object
+
+        :return: True if the tree object should be allowed, False otherwise
+
+        """
+        if self._filter_directories is not None:
+            return self._check_filter_directories(tree_obj_path)
+
+        if self._filter_file_extensions is not None:
+            return self._check_filter_file_extensions(tree_obj_path)
+
+        return True
 
     def _load_data_from_commit(self, commit_sha: str) -> List[Document]:
         """
@@ -214,19 +287,20 @@ class GithubRepositoryReader(BaseReader):
         )
         for tree_obj in tree_data.tree:
             file_path = os.path.join(current_path, tree_obj.path)
+
+            # filter tree object here
+            if not self._allow_tree_obj(file_path):
+                print_if_verbose(
+                    self._verbose,
+                    "\t" * current_depth + f"ignoring {tree_obj.path} due to filter",
+                )
+                continue
+
             if tree_obj.type == "tree":
                 print_if_verbose(
                     self._verbose,
                     "\t" * current_depth + f"recursing into {tree_obj.path}",
                 )
-                if self._ignore_directories is not None:
-                    if file_path in self._ignore_directories:
-                        print_if_verbose(
-                            self._verbose,
-                            "\t" * current_depth
-                            + f"ignoring tree {tree_obj.path} due to directory",
-                        )
-                        continue
 
                 blobs_and_full_paths.extend(
                     await self._recurse_tree(tree_obj.sha, file_path, current_depth + 1)
@@ -235,14 +309,6 @@ class GithubRepositoryReader(BaseReader):
                 print_if_verbose(
                     self._verbose, "\t" * current_depth + f"found blob {tree_obj.path}"
                 )
-                if self._ignore_file_extensions is not None:
-                    if get_file_extension(file_path) in self._ignore_file_extensions:
-                        print_if_verbose(
-                            self._verbose,
-                            "\t" * current_depth
-                            + f"ignoring blob {tree_obj.path} due to file extension",
-                        )
-                        continue
                 blobs_and_full_paths.append((tree_obj, file_path))
         return blobs_and_full_paths
 

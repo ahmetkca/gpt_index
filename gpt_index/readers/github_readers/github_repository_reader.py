@@ -36,10 +36,6 @@ logger = logging.getLogger(__name__)
 
 
 class GithubRepositoryReader(BaseReader):
-    class FilterType(enum.Enum):
-        IGNORE = "ignore"
-        INCLUDE = "include"
-
     """
     Github repository reader.
 
@@ -53,6 +49,10 @@ class GithubRepositoryReader(BaseReader):
         >>> commit_documents = reader.load_data(commit_sha="commit_sha")
 
     """
+
+    class FilterType(enum.Enum):
+        EXCLUDE = enum.auto()
+        INCLUDE = enum.auto()
 
     def __init__(
         self,
@@ -123,7 +123,7 @@ class GithubRepositoryReader(BaseReader):
             + f" based on the filter directories: {filter_directories}",
         )
 
-        if filter_type == self.FilterType.IGNORE:
+        if filter_type == self.FilterType.EXCLUDE:
             return not any(
                 tree_obj_path.startswith(directory)
                 or directory.startswith(tree_obj_path)
@@ -156,7 +156,7 @@ class GithubRepositoryReader(BaseReader):
             + f" based on the filter file extensions: {filter_file_extensions}",
         )
 
-        if filter_type == self.FilterType.IGNORE:
+        if filter_type == self.FilterType.EXCLUDE:
             return get_file_extension(tree_obj_path) not in filter_file_extensions
         elif filter_type == self.FilterType.INCLUDE:
             return get_file_extension(tree_obj_path) in filter_file_extensions
